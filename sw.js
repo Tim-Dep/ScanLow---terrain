@@ -1,5 +1,5 @@
 // Service worker : l'application fonctionne hors ligne une fois chargée ; les tuiles satellite consultées sont gardées en cache.
-const VERSION = 'scanlow-terrain-1.0.0';
+const VERSION = 'scanlow-terrain-1.1.0';
 const SHELL = ['./', 'index.html', 'app.js', 'db.js', 'zip.js', 'app.css', 'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png',
   'vendor/leaflet.js', 'vendor/leaflet.css', 'vendor/vue.global.prod.js'];
 const TILES = 'scanlow-terrain-tuiles', MAX_TILES = 3000;
