@@ -7,7 +7,7 @@ import { db } from './db.js';
 import { makeZip } from './zip.js';
 
 const { createApp, reactive, computed, ref, watch, nextTick, onMounted, onBeforeUnmount, markRaw } = Vue;
-const APP_VERSION = '1.1';
+const APP_VERSION = '1.2.1';
 
 export const POI_TYPES = [
   { k: 'meteo', l: 'Station météo', c: '#2a78d6', i: 'M4 14a4 4 0 0 1 4-4h1a5 5 0 0 1 9.6 1.5A3.5 3.5 0 0 1 18 18H8a4 4 0 0 1-4-4z' },
@@ -35,7 +35,7 @@ const SKYK = Object.fromEntries(SKY.map(s => [s.k, s]));
 const WIND = [{ k: 'calm', l: 'Calme' }, { k: 'light', l: 'Faible' }, { k: 'moderate', l: 'Modéré' }, { k: 'strong', l: 'Fort' }, { k: 'gusty', l: 'Rafales' }];
 const WINDK = Object.fromEntries(WIND.map(s => [s.k, s]));
 const DIRS = ['N', 'NE', 'E', 'SE', 'S', 'SO', 'O', 'NO'];
-const PURPOSES = ['Cartographie du panache', 'Quantification', 'Contrôle périodique', 'Recherche de fuites', 'Mesure statique'];
+const PURPOSES = ['Cartographie', 'Quantification', 'Contrôle périodique', 'Recherche de fuites', 'Mesure statique'];
 const DIMS = [{ k: 0, l: 'Normal', a: 0 }, { k: 1, l: 'Atténué', a: 0.4 }, { k: 2, l: 'Très atténué', a: 0.65 }];
 
 // ------------------------------------------------------------------ outils
@@ -43,6 +43,10 @@ const uid = (p) => p + Date.now().toString(36) + Math.random().toString(36).slic
 const pad = (n) => String(n).padStart(2, '0');
 const hms = (ms) => { if (ms == null) return '–'; const d = new Date(ms); return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; };
 const hm = (ms) => { if (ms == null) return '–'; const d = new Date(ms); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+const hmsUtc = (ms) => { if (ms == null) return '–'; const d = new Date(ms); return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`; };
+const zoneLabel = () => { const z = -new Date().getTimezoneOffset(); return `UTC${z >= 0 ? '+' : '−'}${pad(Math.floor(Math.abs(z) / 60))}:${pad(Math.abs(z) % 60)}`; };
+/** Objectifs cochés + précision libre -> texte (lu par l'outil PC). */
+function purposeText(info) { return [...(info.purposes || []), (info.purpose_extra || '').trim()].filter(Boolean).join(', '); }
 const isoDate = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
 const dur = (s) => { s = Math.max(0, Math.round(s)); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60); return h ? `${h} h ${pad(m)}` : `${m} min ${pad(s % 60)} s`; };
 const fmt = (v, d = 0) => v == null || !Number.isFinite(+v) ? '–' : (+v).toLocaleString('fr-FR', { minimumFractionDigits: d, maximumFractionDigits: d });
@@ -53,11 +57,12 @@ function haversine(a, b) {
   const x = Math.sin((b[1] - a[1]) * r / 2) ** 2 + Math.cos(a[1] * r) * Math.cos(b[1] * r) * Math.sin((b[2] - a[2]) * r / 2) ** 2;
   return 2 * R * Math.asin(Math.sqrt(x));
 }
-/** Heure « HH:MM:SS » du jour de `ref` (ms) -> ms ; la plus proche de ref (passage de minuit). */
-function atTime(hhmmss, ref) {
+/** Heure « HH:MM:SS » du jour de `ref` (ms) -> ms ; la plus proche de ref (passage de minuit). utc : heure lue en UTC. */
+function atTime(hhmmss, ref, utc = false) {
   const m = /^(\d{1,2})[:h](\d{2})(?::(\d{2}))?$/.exec(String(hhmmss || '').trim());
   if (!m) return null;
-  const d = new Date(ref); d.setHours(+m[1], +m[2], +(m[3] || 0), 0);
+  const d = new Date(ref);
+  if (utc) d.setUTCHours(+m[1], +m[2], +(m[3] || 0), 0); else d.setHours(+m[1], +m[2], +(m[3] || 0), 0);
   let t = d.getTime();
   if (t - ref > 12 * 3600e3) t -= 86400e3; else if (ref - t > 12 * 3600e3) t += 86400e3;
   return t;
@@ -81,9 +86,10 @@ function newMission(info = {}, instruments = []) {
   return {
     format: 'scanlow-mission', version: 2, app: 'ScanLow - Terrain ' + APP_VERSION, id: uid('m'),
     created: new Date(now).toISOString(), updated: new Date(now).toISOString(), tz_offset_min: -new Date(now).getTimezoneOffset(),
-    info: { name: '', date: isoDate(now), site: '', operators: '', purpose: '', remarks: '', ...info },
-    instruments: instruments.length ? instruments : [{ id: uid('i'), name: '', serial: '', inlet_height: null, note: '' }],
-    recordings: [], active_rec: null, weather: [], clock: [], puffs: [], segments: [], pois: [], journal: [],
+    time_info: { timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, tz_offset_min: -new Date(now).getTimezoneOffset() },
+    info: { name: '', client: '', date: isoDate(now), site: '', operators: '', purposes: [], purpose_extra: '', purpose: '', remarks: '', ...info },
+    instruments: instruments.length ? instruments : [{ id: uid('i'), name: '', serial: '', species: '', note: '' }],
+    recordings: [], active_rec: null, clock_ref: 'local', weather: [], clock: [], puffs: [], segments: [], pois: [], journal: [],
     stats: { n_points: 0, distance_m: 0, by_rec: {} },
   };
 }
@@ -97,6 +103,9 @@ function migrate(m) {
   m.stats = m.stats || { n_points: 0, distance_m: 0 };
   m.stats.by_rec = m.stats.by_rec || {};
   if (m.active_rec === undefined) m.active_rec = m.recordings.at(-1)?.id || null;
+  if (!Array.isArray(m.info.purposes)) { m.info.purposes = (m.info.purpose || '').split(',').map(x => x.trim()).filter(Boolean); m.info.purpose_extra = ''; }
+  for (const c of m.clock || []) if (!c.ref) c.ref = 'local';
+  if (!m.clock_ref) m.clock_ref = 'local';
   m.version = 2;
   return m;
 }
@@ -110,8 +119,8 @@ function recAt(m, t) {
 const S = reactive({
   screen: 'home', tab: 'terrain', missions: [], m: null, points: markRaw([]), recording: false, fix: null, fixAt: 0, gpsError: null,
   gpsLost: null, follow: true, now: Date.now(), sheet: null, cam: null, toasts: [], installEvt: null, storage: null, busy: null,
-  hiddenAt: null, black: false,
-  set: { alarm: pref('alarm', true), gpsLostS: pref('gpsLostS', 10), dim: pref('dim', 0) },
+  hiddenAt: null, black: false, flash: 0,
+  set: { alarm: pref('alarm', true), gpsLostS: pref('gpsLostS', 10), dim: pref('dim', 0), flashAlarm: pref('flashAlarm', true) },
 });
 watch(() => ({ ...S.set }), (v) => { for (const k in v) setPref(k, v[k]); }, { deep: true });
 let watchId = null, wakeLock = null, lastSaved = 0, saveTimer = null, lastAlarm = 0;
@@ -159,33 +168,57 @@ const recById = (id) => S.m?.recordings.find(r => r.id === id) || null;
 const recColor = (id) => KIND[recById(id)?.kind]?.c || '#fab219';
 const recName = (id) => recById(id)?.name || 'Enregistrement';
 
-// ------------------------------------------------------------------ alarmes (son court + vibration)
-let actx = null;
-function unlockAudio() {
-  try { if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)(); if (actx.state === 'suspended') actx.resume(); } catch { /* pas de son */ }
-}
-document.addEventListener('pointerdown', unlockAudio, { capture: true, passive: true });
+// ------------------------------------------------------------------ alarmes (son + vibration + écran qui clignote)
+// Le son passe par un élément <audio> (canal « médias ») plutôt que par Web Audio : sur iPhone, il n'est alors pas coupé
+// par l'interrupteur silencieux (session audio « lecture » quand le navigateur le permet). Sur Android, il suit le volume
+// des médias : une page web ne peut ni monter le volume ni lever le mode silencieux, d'où l'alarme visuelle en plus.
 const PATTERNS = {
-  gps: { tones: [[1000, .16], [0, .07], [760, .16], [0, .07], [1000, .16], [0, .07], [760, .22]], vib: [200, 80, 200, 80, 300] },
-  screen: { tones: [[1300, .12], [0, .06], [1300, .12]], vib: [120, 60, 120] },
+  gps: { tones: [[1000, .16], [0, .07], [760, .16], [0, .07], [1000, .16], [0, .07], [760, .22]], vib: [300, 100, 300, 100, 500] },
+  screen: { tones: [[1300, .12], [0, .06], [1300, .12], [0, .06], [1300, .12]], vib: [200, 80, 200] },
   ok: { tones: [[880, .09], [1320, .14]], vib: [60] },
   tick: { tones: [[1500, .06]], vib: [40] },
 };
+function wavUrl(tones, vol = 0.95) {   // son carré généré (WAV 16 bits mono) : aucun fichier à télécharger
+  const rate = 22050, n = Math.ceil(tones.reduce((t, [, d]) => t + d, 0) * rate);
+  const buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+  const w = (o, str) => { for (let i = 0; i < str.length; i++) v.setUint8(o + i, str.charCodeAt(i)); };
+  w(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); w(8, 'WAVE'); w(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, 'data'); v.setUint32(40, n * 2, true);
+  let i = 0;
+  for (const [f, d] of tones) {
+    const m = Math.round(d * rate);
+    for (let k = 0; k < m && i < n; k++, i++) {
+      const x = f ? (Math.sin(2 * Math.PI * f * k / rate) >= 0 ? 1 : -1) * Math.min(1, k / 150, (m - k) / 150) * vol : 0;
+      v.setInt16(44 + i * 2, Math.round(x * 26000), true);
+    }
+  }
+  return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+}
+const players = {};
+let audioReady = false;
+function unlockAudio() {   // au premier appui : les éléments audio sont « débloqués » pour pouvoir sonner plus tard
+  if (audioReady) return;
+  audioReady = true;
+  try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch { /* non pris en charge */ }
+  for (const k of Object.keys(PATTERNS)) {
+    const a = new Audio(wavUrl(PATTERNS[k].tones));
+    a.preload = 'auto';
+    players[k] = a;
+    a.muted = true;
+    a.play().then(() => { a.pause(); a.currentTime = 0; a.muted = false; }).catch(() => { a.muted = false; });
+  }
+}
+document.addEventListener('pointerdown', unlockAudio, { capture: true, passive: true });
 function beep(kind = 'gps', force = false) {
   if (!S.set.alarm && !force) return;
   const p = PATTERNS[kind];
   try { navigator.vibrate?.(p.vib); } catch { /* ignoré */ }
-  if (!actx) return;
-  let t = actx.currentTime + 0.01;
-  for (const [f, d] of p.tones) {
-    if (f) {
-      const o = actx.createOscillator(), g = actx.createGain();
-      o.type = 'square'; o.frequency.value = f;
-      g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.25, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + d);
-      o.connect(g).connect(actx.destination); o.start(t); o.stop(t + d + 0.02);
-    }
-    t += d;
+  if ((kind === 'gps' || kind === 'screen') && S.set.flashAlarm) {
+    const t = Date.now(); S.flash = t;
+    setTimeout(() => { if (S.flash === t) S.flash = 0; }, 3500);
   }
+  const a = players[kind];
+  if (a) { try { a.currentTime = 0; a.volume = 1; a.play().catch(() => { /* son bloqué */ }); } catch { /* ignoré */ } }
 }
 
 // ------------------------------------------------------------------ GPS
@@ -773,8 +806,13 @@ const WeatherSheet = {
 const SyncView = {
   setup() {
     const instrTime = ref('');
-    function prefill() { const t = new Date(Date.now() + 20000); t.setSeconds(Math.ceil(t.getSeconds() / 10) * 10); instrTime.value = hms(t.getTime()); }
+    const utc = computed(() => S.m.clock_ref === 'utc');
+    function prefill() {
+      const t = new Date(Date.now() + 20000); t.setSeconds(Math.ceil(t.getSeconds() / 10) * 10);
+      instrTime.value = utc.value ? hmsUtc(t.getTime()) : hms(t.getTime());
+    }
     prefill();
+    function setRef(r) { S.m.clock_ref = r; save(0); prefill(); }
     const instruments = computed(() => S.m.instruments.map(i => i.name).filter(Boolean));
     const instr = ref('');
     watch(instruments, (v) => { if (!v.includes(instr.value)) instr.value = v[0] || ''; }, { immediate: true });
@@ -782,9 +820,10 @@ const SyncView = {
     const clocks = computed(() => S.m.clock.filter(mine));
     const puffs = computed(() => S.m.puffs.filter(mine));
     function top() {   // l'utilisateur appuie quand l'instrument affiche l'heure saisie
-      const t = Date.now(), ti = atTime(instrTime.value, t);
+      const t = Date.now(), ti = atTime(instrTime.value, t, utc.value);
       if (ti == null) { toast('Heure de l’instrument au format HH:MM:SS.', 'warn'); return; }
-      S.m.clock.push({ id: uid('c'), t_phone: t, instrument_time: instrTime.value, offset_s: Math.round((ti - t) / 100) / 10, instrument: instr.value });
+      S.m.clock.push({ id: uid('c'), t_phone: t, instrument_time: instrTime.value, offset_s: Math.round((ti - t) / 100) / 10, instrument: instr.value,
+        ref: utc.value ? 'utc' : 'local' });
       beep('tick', true);
       save(0); prefill();
     }
@@ -816,7 +855,7 @@ const SyncView = {
       const delay = median(ds);
       return { offset: c ? c.offset_s : null, delay, n: ds.length, total: (c ? c.offset_s : 0) + (delay ?? 0) };
     });
-    return { S, instrTime, instruments, instr, clocks, puffs, top, pending, chrono, puffStart, puffPeak, puffCancel, delItem, corr, hms, fmt, signed };
+    return { S, instrTime, instruments, instr, clocks, puffs, top, pending, chrono, puffStart, puffPeak, puffCancel, delItem, corr, hms, hmsUtc, fmt, signed, utc, setRef, zoneLabel };
   },
   template: `
   <div class="page">
@@ -826,11 +865,14 @@ const SyncView = {
     </div>
     <div class="card">
       <div class="step-h"><span class="num">1</span><h3>Écart d’horloge</h3></div>
-      <p class="muted small">Saisissez une heure à venir, puis appuyez sur <b>Top</b> à l’instant exact où l’instrument affiche cette heure.</p>
+      <div class="lbl">L’instrument affiche l’heure</div>
+      <div class="seg2"><button :class="{on: !utc}" @click="setRef('local')">Locale ({{ zoneLabel() }})</button><button :class="{on: utc}" @click="setRef('utc')">UTC</button></div>
+      <div class="phone-clock">Téléphone : <b>{{ hms(S.now) }}</b> locale · <b>{{ hmsUtc(S.now) }}</b> UTC</div>
+      <p class="muted small">Saisissez une heure à venir (en heure {{ utc ? 'UTC' : 'locale' }}), puis appuyez sur <b>Top</b> à l’instant exact où l’instrument affiche cette heure.</p>
       <div class="grid2"><input class="inp mono" v-model="instrTime" inputmode="numeric" placeholder="HH:MM:SS">
         <button class="big-btn" @click="top">Top</button></div>
       <div v-for="c in clocks" :key="c.id" class="mini-item"><span class="pin" style="background:#2a78d6"></span>
-        <div class="grow"><b>{{ signed(c.offset_s) }} s</b><div class="muted small">instrument {{ c.instrument_time }} au top de {{ hms(c.t_phone) }}{{ c.instrument && instruments.length > 1 ? ' · ' + c.instrument : '' }}</div></div>
+        <div class="grow"><b>{{ signed(c.offset_s) }} s</b><div class="muted small">instrument {{ c.instrument_time }} ({{ c.ref === 'utc' ? 'UTC' : 'locale' }}) au top de {{ c.ref === 'utc' ? hmsUtc(c.t_phone) + ' UTC' : hms(c.t_phone) }}{{ c.instrument && instruments.length > 1 ? ' · ' + c.instrument : '' }}</div></div>
         <button class="x small" @click="delItem('clock', c.id)">×</button></div>
     </div>
     <div class="card">
@@ -853,7 +895,8 @@ const SyncView = {
         <div><span>Temps de prélèvement</span><b>{{ corr.delay != null ? fmt(corr.delay, 1) + ' s' : '—' }}</b><small v-if="corr.n > 1">médiane de {{ corr.n }} puffs</small></div><i>=</i>
         <div class="tot"><span>Correction totale</span><b>{{ signed(corr.total) }} s</b></div>
       </div>
-      <p class="small">Heure de prélèvement = heure affichée par l’instrument <b>{{ corr.total >= 0 ? '−' : '+' }} {{ fmt(Math.abs(corr.total), 1) }} s</b>.</p>
+      <p class="small">Heure de prélèvement = heure affichée par l’instrument <b>{{ corr.total >= 0 ? '−' : '+' }} {{ fmt(Math.abs(corr.total), 1) }} s</b>
+        (en heure {{ (clocks.at(-1)?.ref || S.m.clock_ref) === 'utc' ? 'UTC' : 'locale' }}).</p>
       <p class="muted small" v-if="corr.offset == null || corr.delay == null">{{ corr.offset == null ? 'Écart d’horloge non mesuré. ' : '' }}{{ corr.delay == null ? 'Temps de prélèvement non mesuré. ' : '' }}Le PC affine de toute façon la correction en retrouvant les puffs dans les données de l’instrument.</p>
     </div>
   </div>`,
@@ -862,7 +905,9 @@ const SyncView = {
 // ------------------------------------------------------------------ campagne
 const CampaignView = {
   setup() {
-    function addInstr() { S.m.instruments.push({ id: uid('i'), name: '', serial: '', inlet_height: null, note: '' }); save(); }
+    function addInstr() { S.m.instruments.push({ id: uid('i'), name: '', serial: '', species: '', note: '' }); save(); }
+    function togglePurpose(x) { const l = S.m.info.purposes, i = l.indexOf(x); if (i >= 0) l.splice(i, 1); else l.push(x); S.m.info.purpose = purposeText(S.m.info); save(); }
+    function setExtra() { S.m.info.purpose = purposeText(S.m.info); save(); }
     function delInstr(i) { S.m.instruments.splice(i, 1); save(); }
     const editWeather = (w) => { S.sheet = { kind: 'weather', isNew: false, w: JSON.parse(JSON.stringify(w)) }; };
     const durOf = (id) => S.m.segments.filter(g => g.rec === id).reduce((s, g) => s + ((g.end || (S.recording ? S.now : g.start)) - g.start), 0) / 1000;
@@ -870,7 +915,7 @@ const CampaignView = {
       if (S.m.segments.some(g => g.rec === r.id)) { toast('Cet enregistrement contient des points : il ne peut pas être supprimé (renommez-le).', 'warn'); return; }
       S.m.recordings = S.m.recordings.filter(x => x.id !== r.id); save(0);
     }
-    return { S, PURPOSES, REC_KINDS, KIND, addInstr, delInstr, newWeather, editWeather, weatherLine, durOf, delRec, save, hm, dur, fmt, recColor };
+    return { S, PURPOSES, REC_KINDS, KIND, addInstr, delInstr, togglePurpose, setExtra, newWeather, editWeather, weatherLine, durOf, delRec, save, hm, dur, fmt, recColor };
   },
   template: `
   <div class="page">
@@ -879,8 +924,11 @@ const CampaignView = {
       <input class="inp" v-model="S.m.info.name" @input="save()" placeholder="Nom de la campagne">
       <div class="grid2"><label class="lbl">Date<input class="inp" type="date" v-model="S.m.info.date" @change="save()"></label>
         <label class="lbl">Site / lieu<input class="inp" v-model="S.m.info.site" @input="save()" placeholder="ex. ISDND de …"></label></div>
+      <input class="inp" v-model="S.m.info.client" @input="save()" placeholder="Client">
       <input class="inp" v-model="S.m.info.operators" @input="save()" placeholder="Opérateurs">
-      <input class="inp" v-model="S.m.info.purpose" @input="save()" placeholder="Objectif">
+      <label class="lbl">Objectifs</label>
+      <div class="chips"><button v-for="p in PURPOSES" :key="p" class="chip sm" :class="{on: S.m.info.purposes.includes(p)}" @click="togglePurpose(p)">{{ S.m.info.purposes.includes(p) ? '✓ ' : '' }}{{ p }}</button></div>
+      <input class="inp" v-model="S.m.info.purpose_extra" @input="setExtra" placeholder="Autre objectif (facultatif)">
       <textarea class="inp" v-model="S.m.info.remarks" @input="save()" rows="2" placeholder="Remarques générales"></textarea>
     </div>
     <div class="card">
@@ -904,7 +952,7 @@ const CampaignView = {
       <div v-for="(i, k) in S.m.instruments" :key="i.id" class="instr">
         <input class="inp" v-model="i.name" @input="save()" placeholder="Instrument (ex. Aeris MIRA CH4)">
         <div class="grid3"><input class="inp" v-model="i.serial" @input="save()" placeholder="N° série">
-          <input class="inp" type="number" step="0.1" v-model.number="i.inlet_height" @input="save()" placeholder="Prise (m)">
+          <input class="inp" v-model="i.species" @input="save()" :placeholder="i.inlet_height ? 'Espèce (prise ' + i.inlet_height + ' m)' : 'Espèce mesurée (ex. méthane)'">
           <button class="btn sm danger" @click="delInstr(k)">Retirer</button></div>
       </div>
     </div>
@@ -942,21 +990,22 @@ const HomeScreen = {
 };
 const CreateScreen = {
   setup() {
-    const f = reactive({ name: '', date: isoDate(Date.now()), site: pref('lastSite', ''), operators: pref('lastOperators', ''), purpose: '', remarks: '' });
-    const instruments = reactive(pref('lastInstruments', [{ name: '', serial: '', inlet_height: null }]).map(i => ({ id: uid('i'), note: '', ...i })));
+    const f = reactive({ name: '', client: pref('lastClient', ''), date: isoDate(Date.now()), site: pref('lastSite', ''), operators: pref('lastOperators', ''), purposes: [], purpose_extra: '', remarks: '' });
+    const instruments = reactive(pref('lastInstruments', [{ name: '', serial: '', species: '' }]).map(({ inlet_height, ...i }) => ({ id: uid('i'), note: '', species: '', ...i })));
+    const togglePurpose = (x) => { const i = f.purposes.indexOf(x); if (i >= 0) f.purposes.splice(i, 1); else f.purposes.push(x); };
     const tried = ref(false);
-    const addInstr = () => instruments.push({ id: uid('i'), name: '', serial: '', inlet_height: null, note: '' });
+    const addInstr = () => instruments.push({ id: uid('i'), name: '', serial: '', species: '', note: '' });
     async function create() {
       tried.value = true;
       if (!f.name.trim()) { toast('Donnez un nom à la campagne.', 'warn'); return; }
       const ins = instruments.filter(i => i.name.trim()).map(i => ({ ...i, name: i.name.trim() }));
-      setPref('lastSite', f.site); setPref('lastOperators', f.operators);
-      setPref('lastInstruments', ins.map(({ name, serial, inlet_height }) => ({ name, serial, inlet_height })));
-      await createMission({ ...f, name: f.name.trim() }, ins);
+      setPref('lastSite', f.site); setPref('lastOperators', f.operators); setPref('lastClient', f.client);
+      setPref('lastInstruments', ins.map(({ name, serial, species }) => ({ name, serial, species })));
+      await createMission({ ...f, purposes: [...f.purposes], name: f.name.trim(), purpose: purposeText(f) }, ins);
       S.tab = 'terrain';
       toast('Campagne créée. Pensez à synchroniser l’instrument (onglet Synchro).', 'success', 6000);
     }
-    return { S, f, instruments, tried, addInstr, create, PURPOSES };
+    return { S, f, instruments, tried, addInstr, create, PURPOSES, togglePurpose };
   },
   template: `
   <div class="page">
@@ -965,20 +1014,21 @@ const CreateScreen = {
       <label class="lbl">Nom de la campagne *<input class="inp" :class="{bad: tried && !f.name.trim()}" v-model="f.name" placeholder="ex. ISDND Nord – cartographie" autofocus></label>
       <div class="grid2"><label class="lbl">Date<input class="inp" type="date" v-model="f.date"></label>
         <label class="lbl">Site / lieu<input class="inp" v-model="f.site" placeholder="ex. ISDND de …"></label></div>
+      <label class="lbl">Client<input class="inp" v-model="f.client" placeholder="Nom du client (exploitant, donneur d’ordre…)"></label>
       <label class="lbl">Opérateurs<input class="inp" v-model="f.operators" placeholder="Noms ou initiales"></label>
-      <label class="lbl">Objectif</label>
-      <div class="chips"><button v-for="p in PURPOSES" :key="p" class="chip sm" :class="{on: f.purpose===p}" @click="f.purpose = f.purpose===p ? '' : p">{{ p }}</button></div>
-      <input class="inp" v-model="f.purpose" placeholder="ou précisez…">
+      <label class="lbl">Objectifs <span class="muted">(plusieurs choix possibles)</span></label>
+      <div class="chips"><button v-for="p in PURPOSES" :key="p" class="chip sm" :class="{on: f.purposes.includes(p)}" @click="togglePurpose(p)">{{ f.purposes.includes(p) ? '✓ ' : '' }}{{ p }}</button></div>
+      <input class="inp" v-model="f.purpose_extra" placeholder="Autre objectif (facultatif)">
     </div>
     <div class="card">
       <div class="row-sb"><h3>Instruments</h3><button class="btn sm" @click="addInstr">+ Ajouter</button></div>
       <div v-for="(i, k) in instruments" :key="i.id" class="instr">
         <input class="inp" v-model="i.name" placeholder="Instrument (ex. Aeris MIRA Pico CH4)">
         <div class="grid3"><input class="inp" v-model="i.serial" placeholder="N° série">
-          <input class="inp" type="number" step="0.1" v-model.number="i.inlet_height" placeholder="Prise (m)">
+          <input class="inp" v-model="i.species" placeholder="Espèce mesurée (ex. méthane)">
           <button class="btn sm danger" @click="instruments.splice(k, 1)">Retirer</button></div>
       </div>
-      <p class="muted small">Le site, les opérateurs et les instruments sont repris de la campagne précédente.</p>
+      <p class="muted small">Le client, le site, les opérateurs et les instruments sont repris de la campagne précédente.</p>
     </div>
     <button class="big-btn wide" @click="create">Créer la campagne</button>
     <button class="btn wide" @click="S.screen = 'home'">Annuler</button>
@@ -993,12 +1043,17 @@ const FilesView = {
       try {
         const pts = await db.points(S.m.id);
         const track = pts.map(p => (p[7] ? p : [...p.slice(0, 7), ...Array(Math.max(0, 7 - p.length)).fill(null), recAt(S.m, p[0])]));
+        const tzMin = -new Date().getTimezoneOffset();
         const mission = { ...JSON.parse(JSON.stringify(S.m)), track, exported: new Date().toISOString(),
+          time_info: { timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, tz_offset_min: S.m.tz_offset_min ?? tzMin,
+            note: 'Instants en millisecondes UTC (t, t_phone, start, end…) ; heure locale = UTC + tz_offset_min.' },
           device: { ua: navigator.userAgent, tz: Intl.DateTimeFormat().resolvedOptions().timeZone } };
         const files = [];
         const names = Object.fromEntries(S.m.recordings.map(r => [r.id, r.name]));
-        const csv = ['heure_locale;t_utc_ms;latitude;longitude;altitude_m;precision_m;vitesse_ms;cap_deg;enregistrement',
-          ...track.map(p => [new Date(p[0]).toLocaleString('fr-FR'), p[0], ...p.slice(1, 7).map(v => v == null ? '' : String(v).replace('.', ',')), names[p[7]] || ''].join(';'))].join('\r\n');
+        const iso = (ms, off) => new Date(ms + off * 60000).toISOString().slice(0, 19).replace('T', ' ');
+        const off = S.m.tz_offset_min ?? tzMin;
+        const csv = [`heure_locale (${zoneLabel()});heure_utc;t_utc_ms;latitude;longitude;altitude_m;precision_m;vitesse_ms;cap_deg;enregistrement`,
+          ...track.map(p => [iso(p[0], off), iso(p[0], 0), p[0], ...p.slice(1, 7).map(v => v == null ? '' : String(v).replace('.', ',')), names[p[7]] || ''].join(';'))].join('\r\n');
         if (withPhotos) {
           for (const item of [...mission.pois, ...mission.journal]) {
             item.photo_files = [];
@@ -1006,7 +1061,11 @@ const FilesView = {
           }
         }
         files.unshift({ name: 'campaign.json', data: JSON.stringify(mission, null, 1) }, { name: 'track.csv', data: '﻿' + csv },
-          { name: 'LISEZ-MOI.txt', data: `Campagne ScanLow - Terrain : ${S.m.info.name || ''} (${S.m.info.date})\r\nÀ importer dans ScanLow - Mission (PC) : glisser ce fichier .zip dans la fenêtre d'accueil.\r\n` });
+          { name: 'LISEZ-MOI.txt', data: `Campagne ScanLow - Terrain : ${S.m.info.name || ''} (${S.m.info.date})\r\n`
+            + `À importer dans ScanLow - Mission (PC) : glisser ce fichier .zip dans la fenêtre d'accueil.\r\n\r\n`
+            + `Heures : le téléphone enregistre les instants en UTC (millisecondes depuis 1970, colonne t_utc_ms de track.csv et champs de campaign.json).\r\n`
+            + `Fuseau du téléphone : ${Intl.DateTimeFormat().resolvedOptions().timeZone} (${zoneLabel()}). track.csv donne aussi l'heure locale et l'heure UTC.\r\n`
+            + `Écarts d'horloge (Top) : mesurés en heure ${S.m.clock_ref === 'utc' ? 'UTC' : 'locale'} de l'instrument.\r\n` });
         const blob = await makeZip(files);
         const name = `ScanLow_Mission_${S.m.info.date}_${(S.m.info.name || 'sans_nom').normalize('NFKD').replace(/[^\w-]+/g, '_').slice(0, 40)}.zip`;
         const file = new File([blob], name, { type: 'application/zip' });
@@ -1039,10 +1098,14 @@ const FilesView = {
     </div>
     <div class="card">
       <h3>Alarmes</h3>
-      <label class="switch"><input type="checkbox" v-model="S.set.alarm"><span>Bip court et vibration si le GPS est perdu ou si l’écran se coupe pendant l’enregistrement</span></label>
+      <label class="switch"><input type="checkbox" v-model="S.set.alarm"><span>Bip et vibration si le GPS est perdu ou si l’écran se coupe pendant l’enregistrement</span></label>
+      <label class="switch" style="margin-top:8px"><input type="checkbox" v-model="S.set.flashAlarm"><span>Alarme visuelle : l’écran clignote en rouge (utile quand le téléphone est en silencieux)</span></label>
       <div class="lbl">GPS considéré perdu après</div>
       <div class="seg2"><button v-for="s in [5, 10, 20, 30]" :key="s" :class="{on: S.set.gpsLostS===s}" @click="S.set.gpsLostS = s">{{ s }} s</button></div>
-      <button class="btn sm" style="margin-top:8px" @click="beep('gps', true)">Tester le son</button>
+      <button class="btn sm" style="margin-top:8px" @click="beep('gps', true)">Tester l’alarme</button>
+      <p class="muted small">Le son suit le <b>volume des médias</b> du téléphone, pas celui de la sonnerie : montez-le avant de partir.
+        Sur iPhone, le son passe malgré l’interrupteur silencieux quand le navigateur le permet. Sur Android, une page web ne peut pas forcer le son
+        si le volume des médias est à zéro : la vibration et l’alarme visuelle restent actives.</p>
     </div>
     <div class="card">
       <h3>Économie d’énergie</h3>
@@ -1152,6 +1215,7 @@ const App = {
     <div v-if="S.busy" class="busy"><div class="spinner"></div>{{ S.busy }}</div>
     <div v-if="veil" class="veil" :style="'background:rgba(0,0,0,' + veil + ')'"></div>
     <black-screen v-if="S.black"/>
+    <div v-if="S.flash" class="alarm-flash" @click="S.flash = 0"><b>{{ S.gpsLost ? 'GPS PERDU' : 'ÉCRAN COUPÉ' }}</b></div>
   </div>`,
 };
 

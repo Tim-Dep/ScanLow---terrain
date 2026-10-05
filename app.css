@@ -251,3 +251,9 @@ button.ph.add { font: inherit; font-size: 12px; font-weight: 650; }
 .black-info .hint { margin-top: 26px; font-size: 12px; color: #3a1a17; }
 .shell.eco { --page: #0d0d0d; --surface: #161616; --surface-2: #1f1f1f; --border: #2c2c2c; --border-strong: #444; --text: #e6e6e6; --text-2: #b8b7ad; --accent: #5fb3c4; --accent-soft: #1d3136; }
 .shell.eco .top { background: #10262c; }
+
+/* --- v1.2 --- */
+.phone-clock { font-size: 13px; color: var(--text-2); margin: 2px 0 4px; font-variant-numeric: tabular-nums; }
+.alarm-flash { position: fixed; inset: 0; z-index: 7000; display: grid; place-items: center; animation: aflash .5s steps(1) infinite; }
+.alarm-flash b { color: #fff; font-size: 30px; font-weight: 800; letter-spacing: 1px; text-shadow: 0 2px 8px rgba(0,0,0,.5); }
+@keyframes aflash { 0% { background: rgba(215,48,39,.85); } 50% { background: rgba(215,48,39,.25); } }
