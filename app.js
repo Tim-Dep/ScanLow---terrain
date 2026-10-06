@@ -7,7 +7,7 @@ import { db } from './db.js';
 import { makeZip } from './zip.js';
 
 const { createApp, reactive, computed, ref, watch, nextTick, onMounted, onBeforeUnmount, markRaw } = Vue;
-const APP_VERSION = '1.2.1';
+const APP_VERSION = '1.2.3';
 
 export const POI_TYPES = [
   { k: 'meteo', l: 'Station météo', c: '#2a78d6', i: 'M4 14a4 4 0 0 1 4-4h1a5 5 0 0 1 9.6 1.5A3.5 3.5 0 0 1 18 18H8a4 4 0 0 1-4-4z' },
@@ -165,7 +165,19 @@ function goHome() {
   S.screen = 'home';
 }
 const recById = (id) => S.m?.recordings.find(r => r.id === id) || null;
-const recColor = (id) => KIND[recById(id)?.kind]?.c || '#fab219';
+/** Teinte légèrement différente pour chaque enregistrement d'un même type : 1er = couleur du type, puis plus clair / plus foncé. */
+function shade(hex, k) {
+  if (!k) return hex;
+  const n = parseInt(hex.slice(1), 16), rgb = [n >> 16, (n >> 8) & 255, n & 255];
+  const f = Math.min(0.55, 0.22 * Math.ceil(k / 2)), to = k % 2 ? 255 : 0;
+  return '#' + rgb.map(v => Math.round(v + (to - v) * (to ? f : f * 0.85)).toString(16).padStart(2, '0')).join('');
+}
+const recColor = (id) => {
+  const r = recById(id);
+  if (!r) return '#fab219';
+  const same = S.m.recordings.filter(x => x.kind === r.kind);
+  return shade(KIND[r.kind]?.c || '#0f4c5c', same.indexOf(r));
+};
 const recName = (id) => recById(id)?.name || 'Enregistrement';
 
 // ------------------------------------------------------------------ alarmes (son + vibration + écran qui clignote)
@@ -1038,7 +1050,10 @@ const CreateScreen = {
 // ------------------------------------------------------------------ export et réglages
 const FilesView = {
   setup() {
-    async function exportZip(withPhotos = true) {
+    const canShareFiles = (() => { try { return !!navigator.canShare?.({ files: [new File(['x'], 'test.zip', { type: 'application/zip' })] }); } catch { return false; } })();
+    const lastError = ref(null);
+    async function exportZip(withPhotos = true, how = canShareFiles ? 'share' : 'download') {
+      lastError.value = null;
       S.busy = 'Préparation de l’export…';
       try {
         const pts = await db.points(S.m.id);
@@ -1069,19 +1084,29 @@ const FilesView = {
         const blob = await makeZip(files);
         const name = `ScanLow_Mission_${S.m.info.date}_${(S.m.info.name || 'sans_nom').normalize('NFKD').replace(/[^\w-]+/g, '_').slice(0, 40)}.zip`;
         const file = new File([blob], name, { type: 'application/zip' });
-        if (navigator.canShare?.({ files: [file] })) {
-          try { await navigator.share({ files: [file], title: name }); S.m.exported = new Date().toISOString(); save(0); return; }
-          catch (e) { if (e.name === 'AbortError') return; }
+        const size = `${fmt(blob.size / 1e6, 1)} Mo`;
+        if (how === 'share') {
+          if (!navigator.canShare?.({ files: [file] })) {
+            lastError.value = { step: 'partage', name: 'NotSupported', message: `Ce navigateur ne propose pas le partage de fichiers (${size}).` };
+          } else {
+            try { await navigator.share({ files: [file], title: name }); S.m.exported = new Date().toISOString(); save(0); return; }
+            catch (e) {
+              if (e.name === 'AbortError') return;   // partage annulé par l'utilisateur
+              lastError.value = { step: 'partage', name: e.name, message: e.message };
+            }
+          }
+          toast('Partage impossible : enregistrement dans « Téléchargements » à la place.', 'warn', 7000);
         }
         const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove();
-        setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+        setTimeout(() => URL.revokeObjectURL(a.href), 60000);
         S.m.exported = new Date().toISOString(); save(0);
-        toast(`Export : ${name} (${fmt(blob.size / 1e6, 1)} Mo)`, 'success', 6000);
-      } catch (e) { toast('Export impossible : ' + e.message, 'error', 8000); }
+        toast(`Fichier enregistré : ${name} (${size}), dans « Téléchargements » / « Fichiers ».`, 'success', 8000);
+      } catch (e) { lastError.value = { step: 'préparation', name: e.name, message: e.message }; toast('Export impossible : ' + e.message, 'error', 8000); }
       finally { S.busy = null; }
     }
     const nPhotos = computed(() => S.m.pois.reduce((s, p) => s + p.photos.length, 0) + S.m.journal.reduce((s, e) => s + (e.photos?.length || 0), 0));
-    return { S, exportZip, nPhotos, goHome, beep, DIMS, fmt };
+    const browser = navigator.userAgent.replace(/^Mozilla\/5\.0 \(/, '').replace(/\) AppleWebKit.*?(Chrome|Version|Firefox|EdgA|SamsungBrowser)/, ' · $1').slice(0, 120);
+    return { S, exportZip, nPhotos, goHome, beep, DIMS, fmt, canShareFiles, lastError, browser };
   },
   template: `
   <div class="page">
@@ -1090,9 +1115,12 @@ const FilesView = {
       <div class="muted small">{{ S.m.info.site || 'site non renseigné' }} · {{ S.m.info.date }}</div>
       <div class="kpis"><div><b>{{ fmt(S.m.stats.n_points) }}</b><span>points GPS</span></div><div><b>{{ fmt(S.m.stats.distance_m / 1000, 2) }}</b><span>km</span></div>
         <div><b>{{ S.m.pois.length }}</b><span>repères</span></div><div><b>{{ S.m.journal.length }}</b><span>notes</span></div></div>
-      <button class="big-btn wide" @click="exportZip(true)"><svg viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>Exporter la campagne (.zip)</button>
-      <button class="btn wide" @click="exportZip(false)" v-if="nPhotos">Exporter sans les {{ nPhotos }} photos (plus léger)</button>
-      <p class="muted small">Le fichier s’importe dans <b>ScanLow - Mission</b> sur PC. Envoyez-le par le menu de partage (e-mail, OneDrive, Teams…) ou récupérez-le dans « Téléchargements ».
+      <button class="big-btn wide" @click="exportZip(true)"><svg viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>{{ canShareFiles ? 'Partager la campagne (.zip)' : 'Exporter la campagne (.zip)' }}</button>
+      <button v-if="canShareFiles" class="btn wide" @click="exportZip(true, 'download')">Enregistrer dans « Téléchargements »</button>
+      <button class="btn wide" @click="exportZip(false, canShareFiles ? 'share' : 'download')" v-if="nPhotos">Exporter sans les {{ nPhotos }} photos (plus léger)</button>
+      <div v-if="lastError" class="export-err"><b>L’export n’a pas abouti ({{ lastError.step }})</b><div>{{ lastError.name }} : {{ lastError.message }}</div>
+        <div class="muted">Essayez « Enregistrer dans Téléchargements », ou l’export sans photos. Sur un téléphone professionnel, la gestion de flotte (Intune…) peut bloquer le partage vers certaines applications ou les téléchargements.</div></div>
+      <p class="muted small">Le fichier s’importe dans <b>ScanLow - Mission</b> sur PC. {{ canShareFiles ? 'Envoyez-le par le menu de partage (e-mail, OneDrive, Teams…) ou enregistrez-le dans « Téléchargements ».' : 'Ce navigateur ne propose pas le partage de fichiers : le fichier est enregistré dans « Téléchargements ».' }}
         <template v-if="S.m.exported"> Dernier export : {{ new Date(S.m.exported).toLocaleString('fr-FR') }}.</template></p>
       <button class="btn wide" @click="goHome">Changer de campagne / nouvelle campagne</button>
     </div>
@@ -1118,6 +1146,7 @@ const FilesView = {
       <ul class="tips">
         <li>Gardez l’écran allumé et l’application au premier plan pendant l’enregistrement : en arrière-plan, le navigateur coupe le GPS. Le mode « écran noir » garde l’écran allumé en consommant peu.</li>
         <li>Les données restent sur l’appareil jusqu’à l’export : exportez à la fin de chaque journée.</li>
+        <li>Navigateur : {{ browser }} · partage de fichiers {{ canShareFiles ? 'disponible' : 'non disponible' }}.</li>
         <li v-if="S.storage">Stockage utilisé : {{ fmt(S.storage.usage / 1e6, 0) }} Mo sur {{ fmt(S.storage.quota / 1e6, 0) }} Mo disponibles.</li>
       </ul>
     </div>

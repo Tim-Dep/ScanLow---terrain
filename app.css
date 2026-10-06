@@ -257,3 +257,6 @@ button.ph.add { font: inherit; font-size: 12px; font-weight: 650; }
 .alarm-flash { position: fixed; inset: 0; z-index: 7000; display: grid; place-items: center; animation: aflash .5s steps(1) infinite; }
 .alarm-flash b { color: #fff; font-size: 30px; font-weight: 800; letter-spacing: 1px; text-shadow: 0 2px 8px rgba(0,0,0,.5); }
 @keyframes aflash { 0% { background: rgba(215,48,39,.85); } 50% { background: rgba(215,48,39,.25); } }
+
+.export-err { margin-top: 10px; padding: 9px 11px; border-radius: 10px; background: var(--crit-bg); color: var(--crit-ink); font-size: 13px; display: flex; flex-direction: column; gap: 4px; }
+.export-err .muted { color: var(--text-2); }
